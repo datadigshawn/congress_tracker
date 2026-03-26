@@ -517,28 +517,34 @@ if country == "🇺🇸 美國眾議院":
 
     if selected_pol:
         st.markdown(f"#### 📊 {selected_pol} — 交易標的明細")
-        pol_df   = df[df["議員"] == selected_pol]
-        pol_buy  = pol_df[pol_df["操作"] == "Purchase"]["標的"].value_counts()
-        pol_sell = pol_df[pol_df["操作"] == "Sale"]["標的"].value_counts()
+        pol_df    = df[df["議員"] == selected_pol]
+        pol_buy   = (pol_df[pol_df["操作"] == "Purchase"]
+                     .groupby("標的")["金額_數值"].sum() if "金額_數值" in pol_df.columns
+                     else pol_df[pol_df["操作"] == "Purchase"]["標的"].value_counts().astype(float))
+        pol_sell  = (pol_df[pol_df["操作"] == "Sale"]
+                     .groupby("標的")["金額_數值"].sum() if "金額_數值" in pol_df.columns
+                     else pol_df[pol_df["操作"] == "Sale"]["標的"].value_counts().astype(float))
         all_pol_tks = sorted(
             set(pol_buy.index) | set(pol_sell.index),
-            key=lambda t: pol_buy.get(t, 0) - pol_sell.get(t, 0),
+            key=lambda t: pol_buy.get(t, 0.0) - pol_sell.get(t, 0.0),
             reverse=True,
         )
-        net_vals = [pol_buy.get(t, 0) - pol_sell.get(t, 0) for t in all_pol_tks]
+        net_vals = [(pol_buy.get(t, 0.0) - pol_sell.get(t, 0.0)) / 1e6
+                    for t in all_pol_tks]
         bar_colors = [
             ("#cc9900" if v >= 0 else "#cc4400") if t in PORTFOLIO_TICKERS
             else ("#2a6fb5" if v >= 0 else "#8b2222")
             for t, v in zip(all_pol_tks, net_vals)
         ]
         fig_pd = go.Figure()
-        fig_pd.add_bar(name="累積量（買進－賣出）", x=all_pol_tks, y=net_vals,
+        fig_pd.add_bar(name="累積買進量（買進－賣出）", x=all_pol_tks, y=net_vals,
                        marker_color=bar_colors)
         fig_pd.add_hline(y=0, line_color="#555", line_dash="dot")
         fig_pd.update_layout(height=280, showlegend=False,
                              margin=dict(t=10,b=10,l=10,r=10),
                              paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                             yaxis_title="淨次數（買進－賣出）", font=dict(color="#aaa"))
+                             yaxis_title="淨金額（百萬美元，買進－賣出）",
+                             font=dict(color="#aaa"))
         fig_pd.update_xaxes(tickangle=45)
         st.plotly_chart(fig_pd, use_container_width=True)
         pol_detail = (pol_df[["標的","操作","金額","交易日","板塊"]]
