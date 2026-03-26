@@ -520,21 +520,25 @@ if country == "🇺🇸 美國眾議院":
         pol_df   = df[df["議員"] == selected_pol]
         pol_buy  = pol_df[pol_df["操作"] == "Purchase"]["標的"].value_counts()
         pol_sell = pol_df[pol_df["操作"] == "Sale"]["標的"].value_counts()
-        all_pol_tks = (pol_buy.add(pol_sell, fill_value=0)
-                       .sort_values(ascending=False).index.tolist())
+        all_pol_tks = sorted(
+            set(pol_buy.index) | set(pol_sell.index),
+            key=lambda t: pol_buy.get(t, 0) - pol_sell.get(t, 0),
+            reverse=True,
+        )
+        net_vals = [pol_buy.get(t, 0) - pol_sell.get(t, 0) for t in all_pol_tks]
+        bar_colors = [
+            ("#cc9900" if v >= 0 else "#cc4400") if t in PORTFOLIO_TICKERS
+            else ("#2a6fb5" if v >= 0 else "#8b2222")
+            for t, v in zip(all_pol_tks, net_vals)
+        ]
         fig_pd = go.Figure()
-        fig_pd.add_bar(name="買入", x=all_pol_tks,
-                       y=[pol_buy.get(t, 0) for t in all_pol_tks],
-                       marker_color=["#cc9900" if t in PORTFOLIO_TICKERS else "#2a6fb5"
-                                     for t in all_pol_tks])
-        fig_pd.add_bar(name="賣出", x=all_pol_tks,
-                       y=[pol_sell.get(t, 0) for t in all_pol_tks],
-                       marker_color=["#cc4400" if t in PORTFOLIO_TICKERS else "#8b2222"
-                                     for t in all_pol_tks])
-        fig_pd.update_layout(barmode="stack", height=280,
+        fig_pd.add_bar(name="累積量（買進－賣出）", x=all_pol_tks, y=net_vals,
+                       marker_color=bar_colors)
+        fig_pd.add_hline(y=0, line_color="#555", line_dash="dot")
+        fig_pd.update_layout(height=280, showlegend=False,
                              margin=dict(t=10,b=10,l=10,r=10),
                              paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                             legend=dict(orientation="h"), font=dict(color="#aaa"))
+                             yaxis_title="淨次數（買進－賣出）", font=dict(color="#aaa"))
         fig_pd.update_xaxes(tickangle=45)
         st.plotly_chart(fig_pd, use_container_width=True)
         pol_detail = (pol_df[["標的","操作","金額","交易日","板塊"]]
@@ -691,16 +695,15 @@ else:
     if selected_leg:
         st.markdown(f"#### 📊 {selected_leg} — 持股明細")
         ld = tw_df[tw_df["立委"] == selected_leg].copy()
-        ld_grp = (ld.groupby(["公司", "持有人"])["股數"].sum()
-                    .reset_index()
-                    .sort_values("股數", ascending=False))
-        fig_ld = px.bar(ld_grp, x="公司", y="股數", color="持有人",
-                        height=300, barmode="stack",
-                        color_discrete_map={"本人": "#4a9eff"},
-                        labels={"公司": "", "股數": "股數", "持有人": "持有人"})
+        ld_grp = (ld.groupby("公司")["股數"].sum()
+                    .sort_values(ascending=False)
+                    .reset_index())
+        fig_ld = px.bar(ld_grp, x="公司", y="股數",
+                        height=300, color_discrete_sequence=["#4a9eff"],
+                        labels={"公司": "", "股數": "股數"})
         fig_ld.update_layout(margin=dict(t=10,b=10,l=10,r=10),
                               paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                              legend=dict(orientation="h"), font=dict(color="#aaa"))
+                              showlegend=False, font=dict(color="#aaa"))
         fig_ld.update_xaxes(tickangle=45)
         st.plotly_chart(fig_ld, use_container_width=True)
         disp_ld = ld[["公司","持有人","股數","票面額","申報總額","板塊"]].sort_values("股數", ascending=False)
