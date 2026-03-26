@@ -1,10 +1,11 @@
 """
 國會議員交易追蹤器 — Streamlit Web App
-部署於 Streamlit Community Cloud，任何裝置皆可查看
+🇺🇸 美國眾議院 PTR  ×  🇹🇼 台灣立委財產申報
 """
 
 import io
 import re
+import time
 import zipfile
 import requests
 import pdfplumber
@@ -13,7 +14,6 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 from datetime import datetime, timedelta
-from collections import Counter
 
 # ── 頁面設定 ──────────────────────────────────────────────────────
 st.set_page_config(
@@ -23,7 +23,12 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ── 你的持倉標的 ──────────────────────────────────────────────────
+SESS = requests.Session()
+SESS.headers.update({"User-Agent": "Mozilla/5.0"})
+
+# ════════════════════════════════════════════════════════════════
+# ── 美國 US 設定 ─────────────────────────────────────────────────
+# ════════════════════════════════════════════════════════════════
 PORTFOLIO_TICKERS = [
     "AAPL", "MSFT", "NVDA", "GOOGL", "AMZN",
     "META", "TSLA", "AMD", "INTC", "AVGO",
@@ -32,7 +37,6 @@ PORTFOLIO_TICKERS = [
     "LMT", "RTX", "NOC", "BA",
     "SPY", "QQQ", "IWM",
 ]
-
 SECTOR_MAP = {
     "AAPL":"科技","MSFT":"科技","NVDA":"科技","GOOGL":"科技",
     "AMZN":"科技","META":"科技","AMD":"科技","INTC":"科技","AVGO":"科技",
@@ -42,16 +46,33 @@ SECTOR_MAP = {
     "LMT":"國防","RTX":"國防","NOC":"國防","BA":"國防",
     "SPY":"ETF","QQQ":"ETF","IWM":"ETF",
 }
+US_BASE = "https://disclosures-clerk.house.gov/public_disc"
 
-BASE = "https://disclosures-clerk.house.gov/public_disc"
-SESS = requests.Session()
-SESS.headers.update({"User-Agent": "Mozilla/5.0"})
+# ════════════════════════════════════════════════════════════════
+# ── 台灣 TW 設定 ─────────────────────────────────────────────────
+# ════════════════════════════════════════════════════════════════
+TW_API = "https://priso.cy.gov.tw/api/Query"
+TW_PAGE_TPL = {"PageNo": 1, "PageSize": 50, "TotalCount": 0, "OrderByNum": 0, "OrderBySort": ""}
 
+# 台灣科技股板塊對照（可自行擴充）
+TW_SECTOR_MAP = {
+    "台積電":"半導體","聯發科":"半導體","聯電":"半導體","日月光":"半導體",
+    "鴻海":"電子製造","廣達":"電子製造","仁寶":"電子製造","英業達":"電子製造",
+    "台達電":"電子零件","光寶科":"電子零件","研華":"電子零件",
+    "中華電":"電信","台灣大":"電信","遠傳":"電信",
+    "富邦金":"金融","國泰金":"金融","中信金":"金融","兆豐金":"金融","玉山金":"金融",
+    "台塑":"石化","南亞":"石化","台化":"石化","台塑化":"石化",
+    "中鋼":"鋼鐵","中鴻":"鋼鐵",
+    "長榮":"航運","陽明":"航運","萬海":"航運",
+    "台灣高鐵":"交通","中華航空":"航空","長榮航":"航空",
+}
 
-# ── 資料抓取（含快取） ────────────────────────────────────────────
+# ════════════════════════════════════════════════════════════════
+# ── 美國 US 資料函數 ──────────────────────────────────────────────
+# ════════════════════════════════════════════════════════════════
 def fetch_ptr_index(year: int) -> list[dict]:
     import xml.etree.ElementTree as ET
-    resp = SESS.get(f"{BASE}/financial-pdfs/{year}FD.zip", timeout=30)
+    resp = SESS.get(f"{US_BASE}/financial-pdfs/{year}FD.zip", timeout=30)
     resp.raise_for_status()
     with zipfile.ZipFile(io.BytesIO(resp.content)) as z:
         xml_name = [n for n in z.namelist() if n.endswith(".xml")][0]
@@ -80,7 +101,6 @@ def parse_filing_date(s: str):
 
 
 def parse_amount(s: str) -> float:
-    """將金額字串（如 '$15,001 - $50,000'）轉為中位數值（單位：美元）"""
     nums = [float(n.replace(",", "")) for n in re.findall(r"[\d,]+", s)]
     if len(nums) >= 2:
         return (nums[0] + nums[1]) / 2
@@ -125,22 +145,19 @@ def parse_ptr_pdf(pdf_bytes: bytes) -> list[dict]:
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def load_trades(days: int) -> pd.DataFrame:
+def load_us_trades(days: int) -> pd.DataFrame:
     year  = datetime.now().year
     since = datetime.now() - timedelta(days=days)
-
     all_ptrs = fetch_ptr_index(year)
     recent   = [p for p in all_ptrs
                 if (d := parse_filing_date(p["filingDate"])) and d >= since]
-
     rows = []
     prog = st.progress(0, text="正在解析 PTR 申報...")
     for idx, ptr in enumerate(recent):
         prog.progress((idx + 1) / max(len(recent), 1),
                       text=f"解析 {ptr['name']} ({idx+1}/{len(recent)})")
         try:
-            resp = SESS.get(f"{BASE}/ptr-pdfs/{ptr['year']}/{ptr['docId']}.pdf",
-                            timeout=30)
+            resp = SESS.get(f"{US_BASE}/ptr-pdfs/{ptr['year']}/{ptr['docId']}.pdf", timeout=30)
             resp.raise_for_status()
             for t in parse_ptr_pdf(resp.content):
                 rows.append({
@@ -159,7 +176,6 @@ def load_trades(days: int) -> pd.DataFrame:
         except Exception:
             pass
     prog.empty()
-
     df = pd.DataFrame(rows)
     if not df.empty:
         df["交易日_dt"] = pd.to_datetime(df["交易日"], format="%m/%d/%Y", errors="coerce")
@@ -168,202 +184,443 @@ def load_trades(days: int) -> pd.DataFrame:
     return df
 
 
-# ── 側邊欄：篩選控制 ─────────────────────────────────────────────
+# ════════════════════════════════════════════════════════════════
+# ── 台灣 TW 資料函數 ──────────────────────────────────────────────
+# ════════════════════════════════════════════════════════════════
+def fetch_tw_period() -> str:
+    """Get the most recent 廉政專刊 period number."""
+    try:
+        page = dict(TW_PAGE_TPL)
+        page["PageSize"] = 1
+        r = SESS.post(f"{TW_API}/QueryData",
+                      json={"Data": {"Method": "", "Type": "04", "Value": "立法委員"}, "Page": page},
+                      timeout=15)
+        data = r.json()
+        return data["Data"]["Data"][0]["Period"]
+    except Exception:
+        return "299"
+
+
+def parse_tw_stocks(pdf_bytes: bytes) -> list[dict]:
+    """Parse stock holdings section from Taiwan financial disclosure PDF."""
+    stocks = []
+    seen   = set()
+    try:
+        with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+            for page in pdf.pages:
+                text  = page.extract_text() or ""
+                lines = text.split("\n")
+                in_stock = False
+                for line in lines:
+                    s = line.strip()
+                    # Enter stock sub-section
+                    if re.search(r'1\s*[.。]\s*股票', s):
+                        in_stock = True
+                        continue
+                    # Exit when hitting next sub-section or new major section
+                    if in_stock and (re.search(r'^2\s*[.。]', s) or
+                                     re.search(r'^（[九十百]）', s) or
+                                     re.search(r'本欄空白', s)):
+                        in_stock = False
+                        continue
+                    if not in_stock or not s:
+                        continue
+                    # Skip header rows
+                    if re.search(r'名\s*稱|所\s*有\s*人|股\s*數|票\s*面|外\s*幣|總\s*額', s):
+                        continue
+                    # Parse data row: "公司名 所有人 股數 票面額 [外幣] 總額"
+                    m = re.match(
+                        r'^(\S{1,12})\s+([\u4e00-\u9fff]{2,4})\s+([\d,]+)\s+(\d+(?:\.\d+)?)\s*([\d,]*)\s*$',
+                        s
+                    )
+                    if m:
+                        company, owner, shares_s, face_s, total_s = m.groups()
+                        key = (company, owner)
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        try:
+                            stocks.append({
+                                "company":    company,
+                                "owner":      owner,
+                                "shares":     int(shares_s.replace(",", "")),
+                                "face_value": float(face_s),
+                                "total_twd":  float(total_s.replace(",", "")) if total_s else 0.0,
+                            })
+                        except ValueError:
+                            pass
+    except Exception:
+        pass
+    return stocks
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def load_tw_holdings(period: str) -> pd.DataFrame:
+    """Download & parse stock holdings for all 立法委員 in the given 廉政專刊 period."""
+    # ── Step 1: collect filing list ───────────────────────────
+    filings = []
+    page_no = 1
+    while True:
+        page = dict(TW_PAGE_TPL)
+        page["PageNo"] = page_no
+        try:
+            r = SESS.post(f"{TW_API}/QueryData",
+                          json={"Data": {"Method": "", "Type": "04", "Value": "立法委員"},
+                                "Page": page},
+                          timeout=30)
+            data = r.json()
+            if not data.get("Success"):
+                break
+            records = data["Data"]["Data"]
+            if not records:
+                break
+            for rec in records:
+                if rec["Period"] == period and "01" in rec["PublishType"]:
+                    filings.append(rec)
+            # Stop once records drift past the target period
+            if records[-1]["Period"] < period:
+                break
+            page_no += 1
+            if page_no > 20:
+                break
+        except Exception:
+            break
+
+    # ── Step 2: download & parse each PDF ─────────────────────
+    rows = []
+    prog = st.progress(0, text="正在解析立委財產申報 PDF…")
+    for idx, filing in enumerate(filings):
+        prog.progress((idx + 1) / max(len(filings), 1),
+                      text=f"解析 {filing['Name']} ({idx+1}/{len(filings)})")
+        try:
+            pdf_r = SESS.post(f"{TW_API}/getFile",
+                              json={"From": "base", "FileId": filing["Id"]},
+                              timeout=60)
+            stocks = parse_tw_stocks(pdf_r.content)
+            for stk in stocks:
+                rows.append({
+                    "立委":   filing["Name"],
+                    "申報日": filing["PublishDate"],
+                    "公司":   stk["company"],
+                    "持有人": stk["owner"],
+                    "股數":   stk["shares"],
+                    "票面額": stk["face_value"],
+                    "申報總額": stk["total_twd"],
+                    "板塊":   TW_SECTOR_MAP.get(stk["company"], "其他"),
+                    "是否本人": stk["owner"] == filing["Name"],
+                })
+            time.sleep(0.3)   # polite rate-limit
+        except Exception:
+            pass
+    prog.empty()
+    df = pd.DataFrame(rows)
+    return df
+
+
+# ════════════════════════════════════════════════════════════════
+# ── 側邊欄 ───────────────────────────────────────────────────────
+# ════════════════════════════════════════════════════════════════
 with st.sidebar:
     st.title("🏛 國會交易追蹤")
-    st.caption("資料來源：House Clerk 官方 PTR")
 
-    days = st.selectbox("掃描天數", [7, 14, 30, 60, 90], index=2)
+    # 國家切換
+    country = st.radio("資料來源", ["🇺🇸 美國眾議院", "🇹🇼 台灣立委"], horizontal=True)
 
-    if st.button("🔍 立即掃描", type="primary", use_container_width=True):
-        st.cache_data.clear()
+    if country == "🇺🇸 美國眾議院":
+        st.caption("資料來源：House Clerk 官方 PTR")
+        days = st.selectbox("掃描天數", [7, 14, 30, 60, 90], index=2)
+        if st.button("🔍 立即掃描", type="primary", use_container_width=True):
+            st.cache_data.clear()
+        st.divider()
+        match_opt = st.radio("標的篩選", ["全部", "僅持倉標的", "非持倉標的"])
+        type_opt  = st.radio("交易方向", ["全部", "只看買入", "只看賣出"])
+        search    = st.text_input("搜尋議員 / 標的")
+        st.divider()
+        st.caption("你的持倉標的")
+        st.caption(", ".join(PORTFOLIO_TICKERS))
+    else:
+        st.caption("資料來源：監察院財產申報公示系統")
+        tw_period = st.text_input("廉政專刊期別（留空=最新）", value="", placeholder="如 299")
+        if st.button("🔍 重新載入", type="primary", use_container_width=True):
+            st.cache_data.clear()
+        st.divider()
+        tw_search = st.text_input("搜尋立委 / 公司")
+        tw_owner  = st.radio("持有人", ["全部", "僅本人", "配偶/子女"])
+
+
+# ════════════════════════════════════════════════════════════════
+# ── 美國眾議院 頁面 ───────────────────────────────────────────────
+# ════════════════════════════════════════════════════════════════
+if country == "🇺🇸 美國眾議院":
+    with st.spinner("載入資料中…"):
+        df = load_us_trades(days)
+
+    if df.empty:
+        st.warning("無資料，請點擊「立即掃描」")
+        st.stop()
+
+    # 篩選
+    dff = df.copy()
+    if match_opt == "僅持倉標的":
+        dff = dff[dff["持倉"]]
+    elif match_opt == "非持倉標的":
+        dff = dff[~dff["持倉"]]
+    if type_opt == "只看買入":
+        dff = dff[dff["操作"] == "Purchase"]
+    elif type_opt == "只看賣出":
+        dff = dff[dff["操作"] == "Sale"]
+    if search:
+        kw = search.lower()
+        dff = dff[dff["議員"].str.lower().str.contains(kw) |
+                  dff["標的"].str.lower().str.contains(kw)]
+
+    # 統計卡
+    hits  = df[df["持倉"]]
+    buys  = df[df["操作"] == "Purchase"]
+    sells = df[df["操作"] == "Sale"]
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("總交易筆數", len(df))
+    c2.metric("買入", len(buys))
+    c3.metric("賣出", len(sells))
+    c4.metric("命中持倉", len(hits))
+
+    if not hits.empty:
+        hit_tickers = sorted(hits["標的"].unique())
+        st.error(f"⚡ 命中你的持倉：**{', '.join(hit_tickers)}** ({len(hits)} 筆)")
 
     st.divider()
-    match_opt = st.radio("標的篩選", ["全部", "僅持倉標的", "非持倉標的"])
-    type_opt  = st.radio("交易方向", ["全部", "只看買入", "只看賣出"])
-    search    = st.text_input("搜尋議員 / 標的")
 
-    st.divider()
-    st.caption("你的持倉標的")
-    st.caption(", ".join(PORTFOLIO_TICKERS))
+    # 圖表 Row 1
+    col_l, col_r = st.columns(2)
 
-
-# ── 載入資料 ──────────────────────────────────────────────────────
-with st.spinner("載入資料中..."):
-    df = load_trades(days)
-
-if df.empty:
-    st.warning("無資料，請點擊「立即掃描」")
-    st.stop()
-
-# ── 套用篩選 ──────────────────────────────────────────────────────
-dff = df.copy()
-if match_opt == "僅持倉標的":
-    dff = dff[dff["持倉"]]
-elif match_opt == "非持倉標的":
-    dff = dff[~dff["持倉"]]
-if type_opt == "只看買入":
-    dff = dff[dff["操作"] == "Purchase"]
-elif type_opt == "只看賣出":
-    dff = dff[dff["操作"] == "Sale"]
-if search:
-    kw = search.lower()
-    dff = dff[dff["議員"].str.lower().str.contains(kw) |
-              dff["標的"].str.lower().str.contains(kw)]
-
-# ── 統計卡 ────────────────────────────────────────────────────────
-hits = df[df["持倉"]]
-buys = df[df["操作"] == "Purchase"]
-sells= df[df["操作"] == "Sale"]
-
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("總交易筆數", len(df))
-c2.metric("買入", len(buys))
-c3.metric("賣出", len(sells))
-c4.metric("命中持倉", len(hits))
-
-# ── 持倉命中警示 ─────────────────────────────────────────────────
-if not hits.empty:
-    hit_tickers = sorted(hits["標的"].unique())
-    st.error(f"⚡ 命中你的持倉：**{', '.join(hit_tickers)}** ({len(hits)} 筆)")
-
-st.divider()
-
-# ── 圖表區 ────────────────────────────────────────────────────────
-col_l, col_r = st.columns(2)
-
-# 標的買賣次數
-with col_l:
-    st.subheader("標的買賣次數（Top 20）")
-    tk_buy  = df[df["操作"]=="Purchase"]["標的"].value_counts()
-    tk_sell = df[df["操作"]=="Sale"]["標的"].value_counts()
-    all_tks = (tk_buy.add(tk_sell, fill_value=0)
-               .sort_values(ascending=False).head(20).index.tolist())
-    fig_tk = go.Figure()
-    colors_buy  = ["#cc9900" if t in PORTFOLIO_TICKERS else "#2a6fb5" for t in all_tks]
-    colors_sell = ["#cc4400" if t in PORTFOLIO_TICKERS else "#8b2222" for t in all_tks]
-    fig_tk.add_bar(name="買入", x=all_tks,
-                   y=[tk_buy.get(t, 0) for t in all_tks],
-                   marker_color=colors_buy)
-    fig_tk.add_bar(name="賣出", x=all_tks,
-                   y=[tk_sell.get(t, 0) for t in all_tks],
-                   marker_color=colors_sell)
-    fig_tk.update_layout(barmode="stack", height=320,
-                         margin=dict(t=10,b=10,l=10,r=10),
-                         paper_bgcolor="rgba(0,0,0,0)",
-                         plot_bgcolor="rgba(0,0,0,0)",
-                         legend=dict(orientation="h"),
-                         font=dict(color="#aaa"))
-    fig_tk.update_xaxes(tickangle=45)
-    st.plotly_chart(fig_tk, use_container_width=True)
-
-# 板塊分佈（點選展開標的）
-with col_r:
-    st.subheader("板塊分佈（點選展開標的）")
-    sector_ct = df["板塊"].value_counts()
-    fig_sec = px.pie(values=sector_ct.values, names=sector_ct.index,
-                     hole=0.4, height=300,
-                     color_discrete_sequence=px.colors.qualitative.Set2)
-    fig_sec.update_layout(margin=dict(t=10,b=10,l=10,r=10),
-                          paper_bgcolor="rgba(0,0,0,0)",
-                          font=dict(color="#aaa"),
-                          legend=dict(orientation="h", y=-0.1))
-    sec_sel = st.plotly_chart(fig_sec, use_container_width=True,
-                              on_select="rerun", key="sector_pie")
-    if sec_sel.selection.points:
-        clicked_sector = sec_sel.selection.points[0]["label"]
-        sub_df = df[df["板塊"] == clicked_sector]
-        sub_ct = sub_df["標的"].value_counts()
-        st.caption(f"▼ {clicked_sector} 板塊標的佔比")
-        fig_sub = px.pie(values=sub_ct.values, names=sub_ct.index,
-                         hole=0.3, height=240,
-                         color_discrete_sequence=px.colors.qualitative.Pastel)
-        fig_sub.update_layout(margin=dict(t=5,b=5,l=5,r=5),
-                               paper_bgcolor="rgba(0,0,0,0)",
-                               font=dict(color="#aaa"),
-                               legend=dict(orientation="h", y=-0.15))
-        st.plotly_chart(fig_sub, use_container_width=True, key="sector_drill")
-
-col_l2, col_r2 = st.columns(2)
-
-# 每日交易量
-with col_l2:
-    st.subheader("每日交易量")
-    daily = df.groupby(["交易日_dt", "操作"]).size().unstack(fill_value=0)
-    daily = daily.sort_index()
-    fig_t = go.Figure()
-    if "Purchase" in daily.columns:
-        fig_t.add_bar(name="買入", x=daily.index,
-                      y=daily["Purchase"], marker_color="#2a6fb5")
-    if "Sale" in daily.columns:
-        fig_t.add_bar(name="賣出", x=daily.index,
-                      y=daily["Sale"], marker_color="#8b2222")
-    fig_t.update_layout(barmode="stack", height=300,
-                        margin=dict(t=10,b=10,l=10,r=10),
-                        paper_bgcolor="rgba(0,0,0,0)",
-                        plot_bgcolor="rgba(0,0,0,0)",
-                        legend=dict(orientation="h"),
-                        font=dict(color="#aaa"))
-    st.plotly_chart(fig_t, use_container_width=True)
-
-# 最活躍議員
-with col_r2:
-    st.subheader("最活躍議員（Top 10）")
-    pol_ct = df["議員"].value_counts().head(10)
-    fig_p = px.bar(x=pol_ct.values, y=pol_ct.index, orientation="h",
-                   height=300, color_discrete_sequence=["#4a9eff"])
-    fig_p.update_layout(margin=dict(t=10,b=10,l=10,r=10),
-                        paper_bgcolor="rgba(0,0,0,0)",
-                        plot_bgcolor="rgba(0,0,0,0)",
-                        xaxis_title="", yaxis_title="",
-                        font=dict(color="#aaa"))
-    st.plotly_chart(fig_p, use_container_width=True)
-
-# 標的買賣的量
-st.subheader("標的買賣的量（Top 20，估算中位金額）")
-if "金額_數值" in df.columns:
-    vol_buy  = df[df["操作"]=="Purchase"].groupby("標的")["金額_數值"].sum()
-    vol_sell = df[df["操作"]=="Sale"].groupby("標的")["金額_數值"].sum()
-    all_vol_tks = (vol_buy.add(vol_sell, fill_value=0)
+    with col_l:
+        st.subheader("標的買賣次數（Top 20）")
+        tk_buy  = df[df["操作"]=="Purchase"]["標的"].value_counts()
+        tk_sell = df[df["操作"]=="Sale"]["標的"].value_counts()
+        all_tks = (tk_buy.add(tk_sell, fill_value=0)
                    .sort_values(ascending=False).head(20).index.tolist())
-    colors_buy_v  = ["#cc9900" if t in PORTFOLIO_TICKERS else "#2a6fb5" for t in all_vol_tks]
-    colors_sell_v = ["#cc4400" if t in PORTFOLIO_TICKERS else "#8b2222" for t in all_vol_tks]
-    fig_vol = go.Figure()
-    fig_vol.add_bar(name="買入", x=all_vol_tks,
-                    y=[vol_buy.get(t, 0) / 1e6 for t in all_vol_tks],
-                    marker_color=colors_buy_v)
-    fig_vol.add_bar(name="賣出", x=all_vol_tks,
-                    y=[vol_sell.get(t, 0) / 1e6 for t in all_vol_tks],
-                    marker_color=colors_sell_v)
-    fig_vol.update_layout(barmode="stack", height=320,
-                          margin=dict(t=10,b=10,l=10,r=10),
-                          paper_bgcolor="rgba(0,0,0,0)",
-                          plot_bgcolor="rgba(0,0,0,0)",
-                          legend=dict(orientation="h"),
-                          yaxis_title="金額（百萬美元）",
-                          font=dict(color="#aaa"))
-    fig_vol.update_xaxes(tickangle=45)
-    st.plotly_chart(fig_vol, use_container_width=True)
+        fig_tk = go.Figure()
+        colors_buy  = ["#cc9900" if t in PORTFOLIO_TICKERS else "#2a6fb5" for t in all_tks]
+        colors_sell = ["#cc4400" if t in PORTFOLIO_TICKERS else "#8b2222" for t in all_tks]
+        fig_tk.add_bar(name="買入", x=all_tks,
+                       y=[tk_buy.get(t, 0) for t in all_tks], marker_color=colors_buy)
+        fig_tk.add_bar(name="賣出", x=all_tks,
+                       y=[tk_sell.get(t, 0) for t in all_tks], marker_color=colors_sell)
+        fig_tk.update_layout(barmode="stack", height=320,
+                             margin=dict(t=10,b=10,l=10,r=10),
+                             paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                             legend=dict(orientation="h"), font=dict(color="#aaa"))
+        fig_tk.update_xaxes(tickangle=45)
+        st.plotly_chart(fig_tk, use_container_width=True)
 
-st.divider()
+    with col_r:
+        st.subheader("板塊分佈（點選展開標的）")
+        sector_ct = df["板塊"].value_counts()
+        fig_sec = px.pie(values=sector_ct.values, names=sector_ct.index,
+                         hole=0.4, height=300,
+                         color_discrete_sequence=px.colors.qualitative.Set2)
+        fig_sec.update_layout(margin=dict(t=10,b=10,l=10,r=10),
+                               paper_bgcolor="rgba(0,0,0,0)", font=dict(color="#aaa"),
+                               legend=dict(orientation="h", y=-0.1))
+        sec_sel = st.plotly_chart(fig_sec, use_container_width=True,
+                                  on_select="rerun", key="sector_pie")
+        if sec_sel.selection.points:
+            clicked_sector = sec_sel.selection.points[0]["label"]
+            sub_ct = df[df["板塊"] == clicked_sector]["標的"].value_counts()
+            st.caption(f"▼ {clicked_sector} 板塊標的佔比")
+            fig_sub = px.pie(values=sub_ct.values, names=sub_ct.index,
+                             hole=0.3, height=240,
+                             color_discrete_sequence=px.colors.qualitative.Pastel)
+            fig_sub.update_layout(margin=dict(t=5,b=5,l=5,r=5),
+                                   paper_bgcolor="rgba(0,0,0,0)", font=dict(color="#aaa"),
+                                   legend=dict(orientation="h", y=-0.15))
+            st.plotly_chart(fig_sub, use_container_width=True, key="sector_drill")
 
-# ── 明細表格 ──────────────────────────────────────────────────────
-st.subheader(f"明細（{len(dff)} 筆）")
+    # 圖表 Row 2
+    col_l2, col_r2 = st.columns(2)
+    with col_l2:
+        st.subheader("每日交易量")
+        daily = df.groupby(["交易日_dt", "操作"]).size().unstack(fill_value=0).sort_index()
+        fig_t = go.Figure()
+        if "Purchase" in daily.columns:
+            fig_t.add_bar(name="買入", x=daily.index, y=daily["Purchase"], marker_color="#2a6fb5")
+        if "Sale" in daily.columns:
+            fig_t.add_bar(name="賣出", x=daily.index, y=daily["Sale"], marker_color="#8b2222")
+        fig_t.update_layout(barmode="stack", height=300,
+                            margin=dict(t=10,b=10,l=10,r=10),
+                            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                            legend=dict(orientation="h"), font=dict(color="#aaa"))
+        st.plotly_chart(fig_t, use_container_width=True)
 
-display = dff[["議員","州","標的","操作","金額","交易日","揭露日","板塊","持倉"]].copy()
-display["操作"] = display["操作"].map({"Purchase":"買入 🔵","Sale":"賣出 🔴"})
-display["持倉"] = display["持倉"].map({True:"⭐","":""}).fillna("")
+    with col_r2:
+        st.subheader("最活躍議員（Top 10）")
+        pol_ct = df["議員"].value_counts().head(10)
+        fig_p = px.bar(x=pol_ct.values, y=pol_ct.index, orientation="h",
+                       height=300, color_discrete_sequence=["#4a9eff"])
+        fig_p.update_layout(margin=dict(t=10,b=10,l=10,r=10),
+                             paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                             xaxis_title="", yaxis_title="", font=dict(color="#aaa"))
+        st.plotly_chart(fig_p, use_container_width=True)
 
-st.dataframe(
-    display,
-    use_container_width=True,
-    height=480,
-    column_config={
-        "持倉": st.column_config.TextColumn("持倉", width=50),
-        "操作": st.column_config.TextColumn("操作", width=80),
-        "金額": st.column_config.TextColumn("金額", width=160),
-    }
-)
+    # 標的買賣的量
+    st.subheader("標的買賣的量（Top 20，估算中位金額）")
+    if "金額_數值" in df.columns:
+        vol_buy  = df[df["操作"]=="Purchase"].groupby("標的")["金額_數值"].sum()
+        vol_sell = df[df["操作"]=="Sale"].groupby("標的")["金額_數值"].sum()
+        all_vol_tks = (vol_buy.add(vol_sell, fill_value=0)
+                       .sort_values(ascending=False).head(20).index.tolist())
+        fig_vol = go.Figure()
+        fig_vol.add_bar(name="買入", x=all_vol_tks,
+                        y=[vol_buy.get(t, 0)/1e6 for t in all_vol_tks],
+                        marker_color=["#cc9900" if t in PORTFOLIO_TICKERS else "#2a6fb5" for t in all_vol_tks])
+        fig_vol.add_bar(name="賣出", x=all_vol_tks,
+                        y=[vol_sell.get(t, 0)/1e6 for t in all_vol_tks],
+                        marker_color=["#cc4400" if t in PORTFOLIO_TICKERS else "#8b2222" for t in all_vol_tks])
+        fig_vol.update_layout(barmode="stack", height=320,
+                              margin=dict(t=10,b=10,l=10,r=10),
+                              paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                              legend=dict(orientation="h"), yaxis_title="金額（百萬美元）",
+                              font=dict(color="#aaa"))
+        fig_vol.update_xaxes(tickangle=45)
+        st.plotly_chart(fig_vol, use_container_width=True)
 
-st.caption("⚠ 依法議員需在交易後 45 天內申報。⭐ 代表你目前的持倉標的。"
-           " | 資料來源：House Clerk 官方 PTR（僅眾議院）")
+    st.divider()
+
+    # 明細表
+    st.subheader(f"明細（{len(dff)} 筆）")
+    display = dff[["議員","州","標的","操作","金額","交易日","揭露日","板塊","持倉"]].copy()
+    display["操作"] = display["操作"].map({"Purchase":"買入 🔵","Sale":"賣出 🔴"})
+    display["持倉"] = display["持倉"].map({True:"⭐","":""}).fillna("")
+    st.dataframe(display, use_container_width=True, height=480,
+                 column_config={
+                     "持倉": st.column_config.TextColumn("持倉", width=50),
+                     "操作": st.column_config.TextColumn("操作", width=80),
+                     "金額": st.column_config.TextColumn("金額", width=160),
+                 })
+    st.caption("⚠ 依法議員需在交易後 45 天內申報。⭐ 代表你目前的持倉標的。"
+               " | 資料來源：House Clerk 官方 PTR（僅眾議院）")
+
+
+# ════════════════════════════════════════════════════════════════
+# ── 台灣立委 頁面 ─────────────────────────────────────────────────
+# ════════════════════════════════════════════════════════════════
+else:
+    # 決定期別
+    with st.spinner("取得最新期別…"):
+        period = tw_period.strip() if tw_period.strip() else fetch_tw_period()
+    st.info(f"📋 廉政專刊第 **{period}** 期　｜　資料來源：監察院財產申報公示系統", icon="🇹🇼")
+
+    with st.spinner(f"載入第 {period} 期立委持股資料（首次需數分鐘）…"):
+        tw_df = load_tw_holdings(period)
+
+    if tw_df.empty:
+        st.warning("查無股票申報資料，可能該期別尚未有資料或解析失敗。")
+        st.stop()
+
+    # 篩選
+    dff_tw = tw_df.copy()
+    if tw_search:
+        kw = tw_search.lower()
+        dff_tw = dff_tw[dff_tw["立委"].str.lower().str.contains(kw) |
+                        dff_tw["公司"].str.lower().str.contains(kw)]
+    if tw_owner == "僅本人":
+        dff_tw = dff_tw[dff_tw["是否本人"]]
+    elif tw_owner == "配偶/子女":
+        dff_tw = dff_tw[~dff_tw["是否本人"]]
+
+    # 統計卡
+    total_legislators = tw_df["立委"].nunique()
+    legislators_with_stocks = tw_df[tw_df["股數"] > 0]["立委"].nunique()
+    total_companies = tw_df["公司"].nunique()
+    total_shares    = tw_df["股數"].sum()
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("申報立委人數", total_legislators)
+    c2.metric("持有股票人數", legislators_with_stocks)
+    c3.metric("持股公司種類", total_companies)
+    c4.metric("持股總股數", f"{total_shares:,.0f}")
+
+    st.divider()
+
+    # 圖表 Row 1
+    col_l, col_r = st.columns(2)
+
+    with col_l:
+        st.subheader("立委持股數排行（Top 20）")
+        leg_shares = (tw_df.groupby("立委")["股數"].sum()
+                      .sort_values(ascending=False).head(20))
+        fig_leg = px.bar(x=leg_shares.values / 1000, y=leg_shares.index,
+                         orientation="h", height=400,
+                         color_discrete_sequence=["#4a9eff"])
+        fig_leg.update_layout(margin=dict(t=10,b=10,l=10,r=10),
+                               paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                               xaxis_title="持股數（千股）", yaxis_title="",
+                               font=dict(color="#aaa"))
+        st.plotly_chart(fig_leg, use_container_width=True)
+
+    with col_r:
+        st.subheader("板塊分佈（點選展開公司）")
+        tw_sector_ct = tw_df["板塊"].value_counts()
+        fig_tw_sec = px.pie(values=tw_sector_ct.values, names=tw_sector_ct.index,
+                             hole=0.4, height=300,
+                             color_discrete_sequence=px.colors.qualitative.Set3)
+        fig_tw_sec.update_layout(margin=dict(t=10,b=10,l=10,r=10),
+                                  paper_bgcolor="rgba(0,0,0,0)", font=dict(color="#aaa"),
+                                  legend=dict(orientation="h", y=-0.1))
+        tw_sec_sel = st.plotly_chart(fig_tw_sec, use_container_width=True,
+                                     on_select="rerun", key="tw_sector_pie")
+        if tw_sec_sel.selection.points:
+            clicked = tw_sec_sel.selection.points[0]["label"]
+            sub_ct2 = tw_df[tw_df["板塊"] == clicked]["公司"].value_counts()
+            st.caption(f"▼ {clicked} 板塊公司佔比")
+            fig_sub2 = px.pie(values=sub_ct2.values, names=sub_ct2.index,
+                               hole=0.3, height=240,
+                               color_discrete_sequence=px.colors.qualitative.Pastel2)
+            fig_sub2.update_layout(margin=dict(t=5,b=5,l=5,r=5),
+                                    paper_bgcolor="rgba(0,0,0,0)", font=dict(color="#aaa"),
+                                    legend=dict(orientation="h", y=-0.15))
+            st.plotly_chart(fig_sub2, use_container_width=True, key="tw_sector_drill")
+
+    # 圖表 Row 2
+    col_l2, col_r2 = st.columns(2)
+
+    with col_l2:
+        st.subheader("熱門持股（被最多立委持有）")
+        co_cnt = (tw_df.groupby("公司")["立委"].nunique()
+                  .sort_values(ascending=False).head(20))
+        fig_co = px.bar(x=co_cnt.index, y=co_cnt.values,
+                        height=320, color_discrete_sequence=["#f0a500"])
+        fig_co.update_layout(margin=dict(t=10,b=10,l=10,r=10),
+                              paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                              xaxis_title="", yaxis_title="持有立委數",
+                              font=dict(color="#aaa"))
+        fig_co.update_xaxes(tickangle=45)
+        st.plotly_chart(fig_co, use_container_width=True)
+
+    with col_r2:
+        st.subheader("本人 vs 配偶/子女持股（股數）")
+        owner_grp = tw_df.groupby("是否本人")["股數"].sum()
+        labels = {True: "本人", False: "配偶/子女"}
+        fig_own = px.pie(
+            values=owner_grp.values,
+            names=[labels.get(k, str(k)) for k in owner_grp.index],
+            hole=0.4, height=320,
+            color_discrete_sequence=["#4a9eff", "#f06080"])
+        fig_own.update_layout(margin=dict(t=10,b=10,l=10,r=10),
+                               paper_bgcolor="rgba(0,0,0,0)", font=dict(color="#aaa"))
+        st.plotly_chart(fig_own, use_container_width=True)
+
+    st.divider()
+
+    # 明細表
+    st.subheader(f"持股明細（{len(dff_tw)} 筆）")
+    disp_tw = dff_tw[["立委","公司","持有人","股數","票面額","申報總額","板塊","申報日"]].copy()
+    disp_tw["是否本人"] = dff_tw["是否本人"].map({True:"本人 ✅", False:"配偶/子女"})
+    st.dataframe(disp_tw, use_container_width=True, height=480,
+                 column_config={
+                     "股數":   st.column_config.NumberColumn("股數", format="%d"),
+                     "票面額": st.column_config.NumberColumn("票面額(元)", format="%.0f"),
+                     "申報總額": st.column_config.NumberColumn("申報總額(元)", format="%.0f"),
+                 })
+    st.caption("⚠ 資料為年度財產申報，非即時交易。"
+               " | 資料來源：監察院財產申報公示系統 priso.cy.gov.tw")
