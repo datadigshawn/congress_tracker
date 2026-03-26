@@ -414,27 +414,26 @@ if country == "🇺🇸 美國眾議院":
         st.plotly_chart(fig_tk, use_container_width=True)
 
     with col_r:
-        st.subheader("板塊分佈（點選展開標的）")
-        sector_ct = df["板塊"].value_counts()
-        fig_sec = px.pie(values=sector_ct.values, names=sector_ct.index,
-                         hole=0.4, height=300,
-                         color_discrete_sequence=px.colors.qualitative.Set2)
-        fig_sec.update_layout(margin=dict(t=10,b=10,l=10,r=10),
-                               paper_bgcolor="rgba(0,0,0,0)", font=dict(color="#aaa"),
-                               legend=dict(orientation="h", y=-0.1))
-        sec_sel = st.plotly_chart(fig_sec, use_container_width=True,
-                                  on_select="rerun", key="sector_pie")
-        if sec_sel.selection.points:
-            clicked_sector = sec_sel.selection.points[0]["label"]
-            sub_ct = df[df["板塊"] == clicked_sector]["標的"].value_counts()
-            st.caption(f"▼ {clicked_sector} 板塊標的佔比")
-            fig_sub = px.pie(values=sub_ct.values, names=sub_ct.index,
-                             hole=0.3, height=240,
-                             color_discrete_sequence=px.colors.qualitative.Pastel)
-            fig_sub.update_layout(margin=dict(t=5,b=5,l=5,r=5),
-                                   paper_bgcolor="rgba(0,0,0,0)", font=dict(color="#aaa"),
-                                   legend=dict(orientation="h", y=-0.15))
-            st.plotly_chart(fig_sub, use_container_width=True, key="sector_drill")
+        st.subheader("板塊分佈（點選板塊可下鑽）")
+        # Build sunburst data: sector → ticker
+        sun_parents, sun_labels, sun_values = [""], ["全部"], [len(df)]
+        for sector, grp in df.groupby("板塊"):
+            sun_parents.append("全部")
+            sun_labels.append(sector)
+            sun_values.append(len(grp))
+            for ticker, cnt in grp["標的"].value_counts().items():
+                sun_parents.append(sector)
+                sun_labels.append(f"{ticker}\n({cnt})")
+                sun_values.append(cnt)
+        fig_sec = go.Figure(go.Sunburst(
+            labels=sun_labels, parents=sun_parents, values=sun_values,
+            branchvalues="total",
+            insidetextorientation="radial",
+            marker=dict(colors=px.colors.qualitative.Set2 * 10),
+        ))
+        fig_sec.update_layout(height=360, margin=dict(t=10,b=10,l=10,r=10),
+                               paper_bgcolor="rgba(0,0,0,0)", font=dict(color="#aaa"))
+        st.plotly_chart(fig_sec, use_container_width=True)
 
     # 圖表 Row 2
     col_l2, col_r2 = st.columns(2)
@@ -559,27 +558,26 @@ else:
         st.plotly_chart(fig_leg, use_container_width=True)
 
     with col_r:
-        st.subheader("板塊分佈（點選展開公司）")
-        tw_sector_ct = tw_df["板塊"].value_counts()
-        fig_tw_sec = px.pie(values=tw_sector_ct.values, names=tw_sector_ct.index,
-                             hole=0.4, height=300,
-                             color_discrete_sequence=px.colors.qualitative.Set3)
-        fig_tw_sec.update_layout(margin=dict(t=10,b=10,l=10,r=10),
-                                  paper_bgcolor="rgba(0,0,0,0)", font=dict(color="#aaa"),
-                                  legend=dict(orientation="h", y=-0.1))
-        tw_sec_sel = st.plotly_chart(fig_tw_sec, use_container_width=True,
-                                     on_select="rerun", key="tw_sector_pie")
-        if tw_sec_sel.selection.points:
-            clicked = tw_sec_sel.selection.points[0]["label"]
-            sub_ct2 = tw_df[tw_df["板塊"] == clicked]["公司"].value_counts()
-            st.caption(f"▼ {clicked} 板塊公司佔比")
-            fig_sub2 = px.pie(values=sub_ct2.values, names=sub_ct2.index,
-                               hole=0.3, height=240,
-                               color_discrete_sequence=px.colors.qualitative.Pastel2)
-            fig_sub2.update_layout(margin=dict(t=5,b=5,l=5,r=5),
-                                    paper_bgcolor="rgba(0,0,0,0)", font=dict(color="#aaa"),
-                                    legend=dict(orientation="h", y=-0.15))
-            st.plotly_chart(fig_sub2, use_container_width=True, key="tw_sector_drill")
+        st.subheader("板塊分佈（點選板塊可下鑽）")
+        # Build sunburst: sector → company
+        tw_sun_parents, tw_sun_labels, tw_sun_values = [""], ["全部"], [len(tw_df)]
+        for sector, grp in tw_df.groupby("板塊"):
+            tw_sun_parents.append("全部")
+            tw_sun_labels.append(sector)
+            tw_sun_values.append(len(grp))
+            for co, cnt in grp["公司"].value_counts().items():
+                tw_sun_parents.append(sector)
+                tw_sun_labels.append(f"{co}\n({cnt})")
+                tw_sun_values.append(cnt)
+        fig_tw_sec = go.Figure(go.Sunburst(
+            labels=tw_sun_labels, parents=tw_sun_parents, values=tw_sun_values,
+            branchvalues="total",
+            insidetextorientation="radial",
+            marker=dict(colors=px.colors.qualitative.Set3 * 10),
+        ))
+        fig_tw_sec.update_layout(height=360, margin=dict(t=10,b=10,l=10,r=10),
+                                  paper_bgcolor="rgba(0,0,0,0)", font=dict(color="#aaa"))
+        st.plotly_chart(fig_tw_sec, use_container_width=True)
 
     # 圖表 Row 2
     col_l2, col_r2 = st.columns(2)
