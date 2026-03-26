@@ -79,6 +79,16 @@ def parse_filing_date(s: str):
     return None
 
 
+def parse_amount(s: str) -> float:
+    """將金額字串（如 '$15,001 - $50,000'）轉為中位數值（單位：美元）"""
+    nums = [float(n.replace(",", "")) for n in re.findall(r"[\d,]+", s)]
+    if len(nums) >= 2:
+        return (nums[0] + nums[1]) / 2
+    elif len(nums) == 1:
+        return nums[0]
+    return 0.0
+
+
 def parse_ptr_pdf(pdf_bytes: bytes) -> list[dict]:
     with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
         lines = []
@@ -153,6 +163,7 @@ def load_trades(days: int) -> pd.DataFrame:
     df = pd.DataFrame(rows)
     if not df.empty:
         df["交易日_dt"] = pd.to_datetime(df["交易日"], format="%m/%d/%Y", errors="coerce")
+        df["金額_數值"] = df["金額"].apply(parse_amount)
         df = df.sort_values("交易日_dt", ascending=False)
     return df
 
@@ -246,18 +257,32 @@ with col_l:
     fig_tk.update_xaxes(tickangle=45)
     st.plotly_chart(fig_tk, use_container_width=True)
 
-# 板塊分佈
+# 板塊分佈（點選展開標的）
 with col_r:
-    st.subheader("板塊分佈")
+    st.subheader("板塊分佈（點選展開標的）")
     sector_ct = df["板塊"].value_counts()
     fig_sec = px.pie(values=sector_ct.values, names=sector_ct.index,
-                     hole=0.4, height=320,
+                     hole=0.4, height=300,
                      color_discrete_sequence=px.colors.qualitative.Set2)
     fig_sec.update_layout(margin=dict(t=10,b=10,l=10,r=10),
                           paper_bgcolor="rgba(0,0,0,0)",
                           font=dict(color="#aaa"),
                           legend=dict(orientation="h", y=-0.1))
-    st.plotly_chart(fig_sec, use_container_width=True)
+    sec_sel = st.plotly_chart(fig_sec, use_container_width=True,
+                              on_select="rerun", key="sector_pie")
+    if sec_sel.selection.points:
+        clicked_sector = sec_sel.selection.points[0]["label"]
+        sub_df = df[df["板塊"] == clicked_sector]
+        sub_ct = sub_df["標的"].value_counts()
+        st.caption(f"▼ {clicked_sector} 板塊標的佔比")
+        fig_sub = px.pie(values=sub_ct.values, names=sub_ct.index,
+                         hole=0.3, height=240,
+                         color_discrete_sequence=px.colors.qualitative.Pastel)
+        fig_sub.update_layout(margin=dict(t=5,b=5,l=5,r=5),
+                               paper_bgcolor="rgba(0,0,0,0)",
+                               font=dict(color="#aaa"),
+                               legend=dict(orientation="h", y=-0.15))
+        st.plotly_chart(fig_sub, use_container_width=True, key="sector_drill")
 
 col_l2, col_r2 = st.columns(2)
 
@@ -293,6 +318,32 @@ with col_r2:
                         xaxis_title="", yaxis_title="",
                         font=dict(color="#aaa"))
     st.plotly_chart(fig_p, use_container_width=True)
+
+# 標的買賣的量
+st.subheader("標的買賣的量（Top 20，估算中位金額）")
+if "金額_數值" in df.columns:
+    vol_buy  = df[df["操作"]=="Purchase"].groupby("標的")["金額_數值"].sum()
+    vol_sell = df[df["操作"]=="Sale"].groupby("標的")["金額_數值"].sum()
+    all_vol_tks = (vol_buy.add(vol_sell, fill_value=0)
+                   .sort_values(ascending=False).head(20).index.tolist())
+    colors_buy_v  = ["#cc9900" if t in PORTFOLIO_TICKERS else "#2a6fb5" for t in all_vol_tks]
+    colors_sell_v = ["#cc4400" if t in PORTFOLIO_TICKERS else "#8b2222" for t in all_vol_tks]
+    fig_vol = go.Figure()
+    fig_vol.add_bar(name="買入", x=all_vol_tks,
+                    y=[vol_buy.get(t, 0) / 1e6 for t in all_vol_tks],
+                    marker_color=colors_buy_v)
+    fig_vol.add_bar(name="賣出", x=all_vol_tks,
+                    y=[vol_sell.get(t, 0) / 1e6 for t in all_vol_tks],
+                    marker_color=colors_sell_v)
+    fig_vol.update_layout(barmode="stack", height=320,
+                          margin=dict(t=10,b=10,l=10,r=10),
+                          paper_bgcolor="rgba(0,0,0,0)",
+                          plot_bgcolor="rgba(0,0,0,0)",
+                          legend=dict(orientation="h"),
+                          yaxis_title="金額（百萬美元）",
+                          font=dict(color="#aaa"))
+    fig_vol.update_xaxes(tickangle=45)
+    st.plotly_chart(fig_vol, use_container_width=True)
 
 st.divider()
 
