@@ -415,20 +415,34 @@ if country == "🇺🇸 美國眾議院":
 
     with col_r:
         st.subheader("板塊分佈（點選板塊可下鑽）")
+        us_mode = st.radio("統計方式", ["項目統計", "數量統計（估算金額）"],
+                           horizontal=True, key="us_sun_mode")
         # Build sunburst data: sector → ticker
-        sun_parents, sun_labels, sun_values = [""], ["全部"], [len(df)]
-        for sector, grp in df.groupby("板塊"):
-            sun_parents.append("全部")
-            sun_labels.append(sector)
-            sun_values.append(len(grp))
-            for ticker, cnt in grp["標的"].value_counts().items():
+        sun_parents, sun_labels, sun_values = [], [], []
+        if us_mode == "項目統計":
+            root_val = len(df)
+            sec_agg  = df.groupby("板塊").size()
+            tk_agg   = df.groupby(["板塊", "標的"]).size()
+            unit_lbl = lambda v: f"({v:.0f})"
+        else:
+            root_val = df["金額_數值"].sum() if "金額_數值" in df.columns else len(df)
+            sec_agg  = df.groupby("板塊")["金額_數值"].sum()
+            tk_agg   = df.groupby(["板塊", "標的"])["金額_數值"].sum()
+            unit_lbl = lambda v: f"(${v/1e6:.1f}M)"
+        sun_parents += ["",     "全部"]
+        sun_labels  += ["全部", "（其他）"]
+        sun_values  += [root_val, 0]
+        for sector, s_val in sec_agg.items():
+            sun_parents.append("全部");  sun_labels.append(sector);  sun_values.append(s_val)
+            for (sec2, ticker), t_val in tk_agg.items():
+                if sec2 != sector:
+                    continue
                 sun_parents.append(sector)
-                sun_labels.append(f"{ticker}\n({cnt})")
-                sun_values.append(cnt)
+                sun_labels.append(f"{ticker}\n{unit_lbl(t_val)}")
+                sun_values.append(t_val)
         fig_sec = go.Figure(go.Sunburst(
             labels=sun_labels, parents=sun_parents, values=sun_values,
-            branchvalues="total",
-            insidetextorientation="radial",
+            branchvalues="total", insidetextorientation="radial",
             marker=dict(colors=px.colors.qualitative.Set2 * 10),
         ))
         fig_sec.update_layout(height=360, margin=dict(t=10,b=10,l=10,r=10),
@@ -559,20 +573,34 @@ else:
 
     with col_r:
         st.subheader("板塊分佈（點選板塊可下鑽）")
+        tw_mode = st.radio("統計方式", ["項目統計", "數量統計（股數）"],
+                           horizontal=True, key="tw_sun_mode")
         # Build sunburst: sector → company
-        tw_sun_parents, tw_sun_labels, tw_sun_values = [""], ["全部"], [len(tw_df)]
-        for sector, grp in tw_df.groupby("板塊"):
-            tw_sun_parents.append("全部")
-            tw_sun_labels.append(sector)
-            tw_sun_values.append(len(grp))
-            for co, cnt in grp["公司"].value_counts().items():
-                tw_sun_parents.append(sector)
-                tw_sun_labels.append(f"{co}\n({cnt})")
-                tw_sun_values.append(cnt)
+        tw_sun_p, tw_sun_l, tw_sun_v = [], [], []
+        if tw_mode == "項目統計":
+            tw_root_val = len(tw_df)
+            tw_sec_agg  = tw_df.groupby("板塊").size()
+            tw_co_agg   = tw_df.groupby(["板塊", "公司"]).size()
+            tw_unit     = lambda v: f"({v:.0f})"
+        else:
+            tw_root_val = tw_df["股數"].sum()
+            tw_sec_agg  = tw_df.groupby("板塊")["股數"].sum()
+            tw_co_agg   = tw_df.groupby(["板塊", "公司"])["股數"].sum()
+            tw_unit     = lambda v: f"({v/1000:.0f}K股)"
+        tw_sun_p += ["",     "全部"]
+        tw_sun_l += ["全部", "（其他）"]
+        tw_sun_v += [tw_root_val, 0]
+        for sector, s_val in tw_sec_agg.items():
+            tw_sun_p.append("全部");  tw_sun_l.append(sector);  tw_sun_v.append(s_val)
+            for (sec2, co), c_val in tw_co_agg.items():
+                if sec2 != sector:
+                    continue
+                tw_sun_p.append(sector)
+                tw_sun_l.append(f"{co}\n{tw_unit(c_val)}")
+                tw_sun_v.append(c_val)
         fig_tw_sec = go.Figure(go.Sunburst(
-            labels=tw_sun_labels, parents=tw_sun_parents, values=tw_sun_values,
-            branchvalues="total",
-            insidetextorientation="radial",
+            labels=tw_sun_l, parents=tw_sun_p, values=tw_sun_v,
+            branchvalues="total", insidetextorientation="radial",
             marker=dict(colors=px.colors.qualitative.Set3 * 10),
         ))
         fig_tw_sec.update_layout(height=360, margin=dict(t=10,b=10,l=10,r=10),
