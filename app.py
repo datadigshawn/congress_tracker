@@ -187,18 +187,15 @@ def load_us_trades(days: int) -> pd.DataFrame:
 # ════════════════════════════════════════════════════════════════
 # ── 台灣 TW 資料函數 ──────────────────────────────────────────────
 # ════════════════════════════════════════════════════════════════
-def fetch_tw_period() -> str:
-    """Get the most recent 廉政專刊 period number."""
-    try:
-        page = dict(TW_PAGE_TPL)
-        page["PageSize"] = 1
-        r = SESS.post(f"{TW_API}/QueryData",
-                      json={"Data": {"Method": "", "Type": "04", "Value": "立法委員"}, "Page": page},
-                      timeout=15)
-        data = r.json()
-        return data["Data"]["Data"][0]["Period"]
-    except Exception:
-        return "299"
+def parse_roc_date(s: str):
+    """Parse ROC calendar date string like '民國115年 03月 19日' → datetime."""
+    m = re.search(r'民國\s*(\d+)年\s*(\d+)月\s*(\d+)日', s or "")
+    if m:
+        try:
+            return datetime(int(m.group(1)) + 1911, int(m.group(2)), int(m.group(3)))
+        except ValueError:
+            pass
+    return None
 
 
 def parse_tw_stocks(pdf_bytes: bytes) -> list[dict]:
@@ -255,12 +252,18 @@ def parse_tw_stocks(pdf_bytes: bytes) -> list[dict]:
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
-def load_tw_holdings(period: str) -> pd.DataFrame:
-    """Download & parse stock holdings for all 立法委員 in the given 廉政專刊 period."""
-    # ── Step 1: collect filing list ───────────────────────────
+def load_tw_holdings(date_from_str: str, date_to_str: str) -> pd.DataFrame:
+    """Download & parse stock holdings for 立法委員 whose 廉政專刊 PublishDate
+    falls within [date_from_str, date_to_str] (ISO 'YYYY-MM-DD' strings).
+    """
+    date_from = datetime.strptime(date_from_str, "%Y-%m-%d")
+    date_to   = datetime.strptime(date_to_str,   "%Y-%m-%d")
+
+    # ── Step 1: collect filing list filtered by PublishDate ───
     filings = []
     page_no = 1
-    while True:
+    done    = False
+    while not done:
         page = dict(TW_PAGE_TPL)
         page["PageNo"] = page_no
         try:
@@ -275,13 +278,18 @@ def load_tw_holdings(period: str) -> pd.DataFrame:
             if not records:
                 break
             for rec in records:
-                if rec["Period"] == period and "01" in rec["PublishType"]:
+                pub_dt = parse_roc_date(rec.get("PublishDate", ""))
+                if pub_dt is None:
+                    continue
+                if pub_dt > date_to:
+                    continue          # too recent, skip
+                if pub_dt < date_from:
+                    done = True       # older than range — stop paging
+                    break
+                if "01" in rec.get("PublishType", ""):
                     filings.append(rec)
-            # Stop once records drift past the target period
-            if records[-1]["Period"] < period:
-                break
             page_no += 1
-            if page_no > 20:
+            if page_no > 120:         # safety cap (~5 years × ~24 pages/year)
                 break
         except Exception:
             break
@@ -309,7 +317,7 @@ def load_tw_holdings(period: str) -> pd.DataFrame:
                     "板塊":   TW_SECTOR_MAP.get(stk["company"], "其他"),
                     "是否本人": stk["owner"] == filing["Name"],
                 })
-            time.sleep(0.3)   # polite rate-limit
+            time.sleep(0.3)           # polite rate-limit
         except Exception:
             pass
     prog.empty()
@@ -340,7 +348,26 @@ with st.sidebar:
         st.caption(", ".join(PORTFOLIO_TICKERS))
     else:
         st.caption("資料來源：監察院財產申報公示系統")
-        tw_period = st.text_input("廉政專刊期別（留空=最新）", value="", placeholder="如 299")
+        # ── 時間範圍選擇（最細到月，最久到過去 5 年）─────────────────
+        _now = datetime.now()
+        _ym_list: list[str] = []
+        _y, _m = _now.year - 5, _now.month
+        while (_y, _m) <= (_now.year, _now.month):
+            _ym_list.append(f"{_y}-{_m:02d}")
+            _m += 1
+            if _m > 12:
+                _m = 1
+                _y += 1
+        _default_from = _ym_list[max(0, len(_ym_list) - 13)]  # 約 1 年前
+        _default_to   = _ym_list[-1]
+        tw_range = st.select_slider(
+            "查詢時間範圍（月份）",
+            options=_ym_list,
+            value=(_default_from, _default_to),
+            format_func=lambda s: f"{s[:4]}年{s[5:]}月",
+        )
+        tw_date_from = tw_range[0] + "-01"
+        tw_date_to   = tw_range[1] + "-28"
         if st.button("🔍 重新載入", type="primary", use_container_width=True):
             st.cache_data.clear()
         st.divider()
@@ -518,13 +545,12 @@ if country == "🇺🇸 美國眾議院":
 # ── 台灣立委 頁面 ─────────────────────────────────────────────────
 # ════════════════════════════════════════════════════════════════
 else:
-    # 決定期別
-    with st.spinner("取得最新期別…"):
-        period = tw_period.strip() if tw_period.strip() else fetch_tw_period()
-    st.info(f"📋 廉政專刊第 **{period}** 期　｜　資料來源：監察院財產申報公示系統", icon="🇹🇼")
+    _from_lbl = f"{tw_range[0][:4]}年{tw_range[0][5:]}月"
+    _to_lbl   = f"{tw_range[1][:4]}年{tw_range[1][5:]}月"
+    st.info(f"📋 查詢期間：{_from_lbl} ～ {_to_lbl}　｜　資料來源：監察院財產申報公示系統", icon="🇹🇼")
 
-    with st.spinner(f"載入第 {period} 期立委持股資料（首次需數分鐘）…"):
-        tw_df = load_tw_holdings(period)
+    with st.spinner("載入立委持股資料（首次需數分鐘）…"):
+        tw_df = load_tw_holdings(tw_date_from, tw_date_to)
 
     if tw_df.empty:
         st.warning("查無股票申報資料，可能該期別尚未有資料或解析失敗。")
