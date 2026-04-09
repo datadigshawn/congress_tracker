@@ -3,3 +3,7 @@ dashboard.html
 __pycache__/
 *.pyc
 .DS_Store
+data.db
+data.db.part
+venv/
+.streamlit/secrets.toml

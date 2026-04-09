@@ -1,6 +1,8 @@
 """
-國會議員交易追蹤器 — Streamlit Web App
-🇺🇸 美國國會（眾議院 + 參議院）PTR  ×  🇹🇼 台灣立委財產申報
+國會議員交易追蹤器 — Streamlit Web App（💾 本地 DB 離線版）
+🇺🇸 美國國會（眾議院 + 參議院）PTR  ×  🇹🇼 台灣民代財產申報
+讀取本地 data.db，不走即時抓取。資料同步請跑：
+    python sync_data.py --source all
 """
 
 import calendar
@@ -8,6 +10,7 @@ import io
 import os
 import re
 import sqlite3
+import subprocess
 import time
 import zipfile
 import requests
@@ -21,11 +24,114 @@ from datetime import date, datetime, timedelta
 
 # ── 頁面設定 ──────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="國會交易追蹤",
-    page_icon="🏛",
+    page_title="國會交易追蹤（離線版）",
+    page_icon="💾",
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+# ── 本地資料庫 ──────────────────────────────────────────────────
+# 在 Streamlit Cloud 上，專案目錄為 read-only 的 clone，我們把 data.db 放到
+# /tmp 下（container 可寫），並在首次啟動時從 GitHub Release 下載。
+# 本機執行則直接用 repo 內的 data.db。
+_LOCAL_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data.db")
+_CLOUD_DB_PATH = "/tmp/data.db"
+# 偵測是否在 Streamlit Cloud（環境變數 HOSTNAME 通常是 streamlit）
+_IS_CLOUD = bool(os.environ.get("STREAMLIT_RUNTIME_CLOUD")) or "HOSTNAME" in os.environ and "streamlit" in os.environ.get("HOSTNAME", "").lower()
+
+def _resolve_data_db_path() -> str:
+    # 本機：優先用 repo 內已同步好的 data.db
+    if os.path.exists(_LOCAL_DB_PATH):
+        return _LOCAL_DB_PATH
+    # 雲端：放 /tmp 以便後續下載
+    return _CLOUD_DB_PATH
+
+DATA_DB_PATH = _resolve_data_db_path()
+
+# ── 從 GitHub Release 下載 data.db ─────────────────────────────
+# 使用 streamlit secrets 設定：
+#   [data_release]
+#   repo = "datadigshawn/congress_tracker"
+#   tag  = "data-latest"       # release tag
+#   asset = "data.db"          # asset 檔名
+#   token = "ghp_xxx"          # 可選：private repo 才需要
+def _download_data_db_from_release() -> tuple[bool, str]:
+    """從 GitHub Release 下載 data.db → DATA_DB_PATH。回傳 (ok, message)。"""
+    try:
+        cfg = st.secrets.get("data_release", {}) if hasattr(st, "secrets") else {}
+    except Exception:
+        cfg = {}
+    repo  = cfg.get("repo")  or os.environ.get("DATA_REPO",  "datadigshawn/congress_tracker")
+    tag   = cfg.get("tag")   or os.environ.get("DATA_TAG",   "data-latest")
+    asset = cfg.get("asset") or os.environ.get("DATA_ASSET", "data.db")
+    token = cfg.get("token") or os.environ.get("GITHUB_TOKEN") or os.environ.get("DATA_TOKEN")
+
+    api = f"https://api.github.com/repos/{repo}/releases/tags/{tag}"
+    headers = {"Accept": "application/vnd.github+json", "User-Agent": "congressTrack-offline"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    try:
+        r = requests.get(api, headers=headers, timeout=30)
+        r.raise_for_status()
+        rel = r.json()
+        target = next((a for a in rel.get("assets", []) if a["name"] == asset), None)
+        if not target:
+            return False, f"Release {tag} 找不到 asset `{asset}`"
+        dl_url = target["url"]  # 用 API url 搭配 Accept: octet-stream 才能抓 private asset
+        dl_headers = dict(headers)
+        dl_headers["Accept"] = "application/octet-stream"
+        with requests.get(dl_url, headers=dl_headers, stream=True, timeout=300) as dr:
+            dr.raise_for_status()
+            os.makedirs(os.path.dirname(DATA_DB_PATH) or ".", exist_ok=True)
+            tmp = DATA_DB_PATH + ".part"
+            with open(tmp, "wb") as f:
+                for chunk in dr.iter_content(chunk_size=1 << 20):
+                    if chunk:
+                        f.write(chunk)
+            os.replace(tmp, DATA_DB_PATH)
+        size_mb = os.path.getsize(DATA_DB_PATH) / (1024 * 1024)
+        updated = target.get("updated_at", "?")
+        return True, f"✅ 已下載 {asset} ({size_mb:.1f} MB)，release 更新時間 {updated}"
+    except Exception as e:
+        return False, f"下載失敗：{e}"
+
+
+def _ensure_data_db() -> None:
+    """啟動時確保 DATA_DB_PATH 存在；不存在則自動從 Release 下載。"""
+    if os.path.exists(DATA_DB_PATH):
+        return
+    with st.spinner("首次啟動：從 GitHub Release 下載 data.db…"):
+        ok, msg = _download_data_db_from_release()
+    (st.success if ok else st.error)(msg)
+
+
+_ensure_data_db()
+
+
+def _local_db_ready() -> bool:
+    if not os.path.exists(DATA_DB_PATH):
+        return False
+    try:
+        with sqlite3.connect(DATA_DB_PATH) as c:
+            c.execute("SELECT 1 FROM us_trades LIMIT 1")
+            c.execute("SELECT 1 FROM tw_holdings LIMIT 1")
+        return True
+    except Exception:
+        return False
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _get_sync_log() -> pd.DataFrame:
+    if not os.path.exists(DATA_DB_PATH):
+        return pd.DataFrame()
+    try:
+        with sqlite3.connect(DATA_DB_PATH) as c:
+            return pd.read_sql(
+                "SELECT source, last_synced, row_count FROM sync_log ORDER BY source",
+                c,
+            )
+    except Exception:
+        return pd.DataFrame()
 
 SESS = requests.Session()
 SESS.headers.update({"User-Agent": "Mozilla/5.0"})
@@ -435,63 +541,25 @@ def parse_ptr_pdf(pdf_bytes: bytes) -> list[dict]:
     return trades
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def load_us_trades(days: int, today: str) -> pd.DataFrame:   # Fix #7：加入 today 作為 cache key
-    """
-    Fix #4：進度條用 try/finally 確保一定被清除。
-    Fix #7：cache key 加入 today，避免跨日後仍用舊快取。
-    """
-    now = datetime.now()
-    since = now - timedelta(days=days)
-    # 眾議院 PTR index 以「申報年度」為單位，若 days 超過一年要抓多個年度
-    # 多抓 1 年緩衝（交易日可能在申報日前幾個月）
-    years_to_fetch = list(range(since.year - 1, now.year + 1))
-    all_ptrs = []
-    for y in years_to_fetch:
-        try:
-            all_ptrs.extend(fetch_ptr_index(y))
-        except Exception:
-            pass
-    # 依申報日過濾
-    recent = [p for p in all_ptrs
-              if (d := parse_filing_date(p["filingDate"])) and d >= since]
-    rows = []
-    prog = st.progress(0, text="正在解析 PTR 申報...")
-    try:
-        for idx, ptr in enumerate(recent):
-            prog.progress((idx + 1) / max(len(recent), 1),
-                          text=f"解析 {ptr['name']} ({idx+1}/{len(recent)})")
-            try:
-                resp = SESS.get(
-                    f"{US_BASE}/ptr-pdfs/{ptr['year']}/{ptr['docId']}.pdf",
-                    timeout=30,
-                )
-                resp.raise_for_status()
-                for t in parse_ptr_pdf(resp.content):
-                    rows.append({
-                        "議員":   ptr["name"],
-                        "州":    ptr["state"],
-                        "院":    "眾議院",
-                        "標的":  t["ticker"],
-                        "操作":  t["type"],
-                        "金額":  t["amount"],
-                        "交易日": t["txDate"],
-                        "揭露日": t["disclosureDate"],
-                        "申報日": ptr["filingDate"],
-                        "板塊":  SECTOR_MAP.get(t["ticker"], "其他"),
-                        "持倉":  t["ticker"] in PORTFOLIO_SET,
-                    })
-            except Exception:
-                pass
-    finally:
-        prog.empty()   # Fix #4：無論是否發生 exception，進度條一定被清除
-
-    df = pd.DataFrame(rows)
-    if not df.empty:
-        df["交易日_dt"] = pd.to_datetime(df["交易日"], format="%m/%d/%Y", errors="coerce")
-        df["金額_數值"] = df["金額"].apply(parse_amount)
-        df = df.sort_values("交易日_dt", ascending=False)
-    return df
+@st.cache_data(ttl=300, show_spinner=False)
+def load_us_trades(days: int, today: str) -> pd.DataFrame:
+    """[OFFLINE] 從 data.db 讀取眾議院資料，用 days 過濾交易日。"""
+    if not _local_db_ready():
+        return pd.DataFrame()
+    since = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+    with sqlite3.connect(DATA_DB_PATH) as conn:
+        df = pd.read_sql(
+            """SELECT 議員,院,州,標的,操作,金額,交易日,揭露日,申報日,板塊,持倉
+               FROM us_trades WHERE 院='眾議院'""",
+            conn,
+        )
+    if df.empty:
+        return df
+    df["交易日_dt"] = pd.to_datetime(df["交易日"], format="%m/%d/%Y", errors="coerce")
+    df["金額_數值"] = df["金額"].apply(parse_amount)
+    df["持倉"] = df["持倉"].astype(bool)
+    df = df[df["交易日_dt"] >= pd.Timestamp(since)]
+    return df.sort_values("交易日_dt", ascending=False)
 
 
 # ════════════════════════════════════════════════════════════════
@@ -604,44 +672,94 @@ def _normalize_senate_amount(s: str) -> str:
     return amount_map.get(s.strip(), s)
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def load_senate_trades(days: int, today: str) -> pd.DataFrame:
-    """從 Senate eFD 官方 PTR 入口載入參議院交易資料。"""
-    import senate_efd  # 延遲匯入，避免影響其他來源
+    """[OFFLINE] 從 data.db 讀取參議院資料。"""
+    if not _local_db_ready():
+        return pd.DataFrame()
+    since = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+    with sqlite3.connect(DATA_DB_PATH) as conn:
+        df = pd.read_sql(
+            """SELECT 議員,院,州,標的,操作,金額,交易日,揭露日,申報日,板塊,持倉
+               FROM us_trades WHERE 院='參議院'""",
+            conn,
+        )
+    if df.empty:
+        return df
+    df["交易日_dt"] = pd.to_datetime(df["交易日"], format="%m/%d/%Y", errors="coerce")
+    df["金額_數值"] = df["金額"].apply(parse_amount)
+    df["持倉"] = df["持倉"].astype(bool)
+    df = df[df["交易日_dt"] >= pd.Timestamp(since)]
+    return df.sort_values("交易日_dt", ascending=False)
+
+
+def _legacy_load_senate_disabled(days: int, today: str) -> pd.DataFrame:
+    """原即時抓取邏輯（保留程式碼以利對照），不再被呼叫。"""
     since = datetime.now() - timedelta(days=days)
     rows: list[dict] = []
+    page = 1
+    max_pages = 100
+    consecutive_failures = 0
     prog = st.progress(0, text="正在載入參議院交易資料...")
-
-    def _cb(cur: int, total: int, label: str) -> None:
-        try:
-            frac = min(max(cur / total, 0.0), 0.99) if total else 0.0
-        except Exception:
-            frac = 0.0
-        prog.progress(frac, text=label)
-
     try:
-        trades = senate_efd.fetch_senate_ptrs(days, progress_cb=_cb)
-        for t in trades:
-            # 過濾交易日超出範圍者
-            try:
-                tx_dt = datetime.strptime(t["txDate"], "%m/%d/%Y")
-                if tx_dt < since:
-                    continue
-            except ValueError:
-                pass
-            rows.append({
-                "議員":   t["name"],
-                "州":    t.get("state", ""),
-                "院":    "參議院",
-                "標的":  t["ticker"],
-                "操作":  t["type"],
-                "金額":  t["amount"],
-                "交易日": t["txDate"],
-                "揭露日": t.get("filedDate") or t["txDate"],
-                "申報日": t.get("filedDate") or t["txDate"],
-                "板塊":  SECTOR_MAP.get(t["ticker"], "其他"),
-                "持倉":  t["ticker"] in PORTFOLIO_SET,
-            })
+        while page <= max_pages:
+            prog.progress(min(page / max_pages, 0.99),
+                          text=f"載入參議院交易第 {page} 頁...")
+            # 單頁抓取 + 重試 3 次，避免單次瞬斷就停掉整個分頁
+            trades = None
+            for attempt in range(3):
+                try:
+                    resp = SESS.get(
+                        CAPITOL_TRADES_URL,
+                        params={"chamber": "senate", "txDate": f"{days}d", "page": page},
+                        timeout=30,
+                    )
+                    if resp.status_code == 200:
+                        trades = _parse_capitol_trades_page(resp.text)
+                        break
+                except Exception:
+                    pass
+                time.sleep(1.0 * (attempt + 1))
+
+            if trades is None:
+                # 三次都失敗：跳過此頁，但不中止整個分頁流程
+                consecutive_failures += 1
+                if consecutive_failures >= 3:
+                    break
+                page += 1
+                continue
+            consecutive_failures = 0
+
+            if not trades:
+                break
+
+            stop = False
+            for t in trades:
+                # 檢查日期是否超出範圍
+                try:
+                    tx_dt = datetime.strptime(t["txDate"], "%m/%d/%Y")
+                    if tx_dt < since:
+                        stop = True
+                        continue
+                except ValueError:
+                    pass
+                rows.append({
+                    "議員":   t["name"],
+                    "州":    t["state"],
+                    "院":    "參議院",
+                    "標的":  t["ticker"],
+                    "操作":  t["type"],
+                    "金額":  t["amount"],
+                    "交易日": t["txDate"],
+                    "揭露日": t.get("filedDate") or t["txDate"],
+                    "申報日": t.get("filedDate") or t["txDate"],
+                    "板塊":  SECTOR_MAP.get(t["ticker"], "其他"),
+                    "持倉":  t["ticker"] in PORTFOLIO_SET,
+                })
+            if stop:
+                break
+            page += 1
+            time.sleep(0.5)
     finally:
         prog.empty()
 
@@ -866,18 +984,48 @@ def _dept_to_city(dept: str | None) -> str:
     return m.group(1) if m else dept
 
 
-@st.cache_data(ttl=86400, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def load_tw_holdings(
     date_from_str: str,
     date_to_str: str,
     role: str = "立法委員",
     cities: tuple[str, ...] | None = None,
 ) -> pd.DataFrame:
-    """
-    載入台灣民意代表財產申報（股票部分）。
-    role: '立法委員' 或 '議員'（縣市議員，涵蓋直轄市 + 一般縣市）
-    cities: 當 role='議員' 時可指定要抓的縣市 tuple；None = 全部
-    """
+    """[OFFLINE] 從 data.db 讀取 TW 民代持股資料。"""
+    if not _local_db_ready():
+        return pd.DataFrame()
+    q = "SELECT * FROM tw_holdings WHERE 職稱 = ?"
+    params: list = [role]
+    if cities:
+        q += f" AND 縣市 IN ({','.join(['?']*len(cities))})"
+        params.extend(cities)
+    with sqlite3.connect(DATA_DB_PATH) as conn:
+        df = pd.read_sql(q, conn, params=params)
+    if df.empty:
+        return df
+    # 用 ROC 民國年比對申報日：申報日格式 "民國115年 04月 09日"
+    def _to_iso(roc: str) -> str:
+        m = re.search(r"民國\s*(\d+)年\s*(\d+)月\s*(\d+)日", roc or "")
+        if not m:
+            return ""
+        try:
+            return f"{int(m.group(1))+1911:04d}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
+        except Exception:
+            return ""
+    df["_申報日_iso"] = df["申報日"].apply(_to_iso)
+    df = df[(df["_申報日_iso"] >= date_from_str) & (df["_申報日_iso"] <= date_to_str)]
+    df = df.drop(columns=["_申報日_iso", "_synced_at"], errors="ignore")
+    df["是否本人"] = df["是否本人"].astype(bool)
+    return df.reset_index(drop=True)
+
+
+def _legacy_load_tw_disabled(
+    date_from_str: str,
+    date_to_str: str,
+    role: str = "立法委員",
+    cities: tuple[str, ...] | None = None,
+) -> pd.DataFrame:
+    """原即時抓取邏輯（保留以利對照），不再被呼叫。"""
     date_from = datetime.strptime(date_from_str, "%Y-%m-%d")
     date_to   = datetime.strptime(date_to_str,   "%Y-%m-%d")
     api_value = "立法委員" if role == "立法委員" else "議員"
@@ -1012,7 +1160,52 @@ def build_sunburst(
 # ── 側邊欄 ───────────────────────────────────────────────────────
 # ════════════════════════════════════════════════════════════════
 with st.sidebar:
-    st.title("🏛 國會交易追蹤")
+    st.title("💾 國會交易追蹤（離線）")
+
+    # ── 資料同步狀態 ──
+    with st.expander("📊 本地資料庫狀態", expanded=not _local_db_ready()):
+        if not _local_db_ready():
+            st.error("找不到 data.db 或資料表為空。\n\n"
+                     "請先執行：\n```\npython sync_data.py --source all\n```")
+        else:
+            _log = _get_sync_log()
+            if _log.empty:
+                st.warning("data.db 存在但 sync_log 為空")
+            else:
+                st.dataframe(
+                    _log.rename(columns={
+                        "source": "來源", "last_synced": "上次同步", "row_count": "筆數",
+                    }),
+                    hide_index=True, use_container_width=True,
+                )
+
+        if st.button("⬇️ 從 GitHub Release 重新下載 data.db",
+                     use_container_width=True, key="redl_db"):
+            if os.path.exists(DATA_DB_PATH):
+                try: os.remove(DATA_DB_PATH)
+                except Exception: pass
+            ok, msg = _download_data_db_from_release()
+            (st.success if ok else st.error)(msg)
+            st.cache_data.clear()
+            st.rerun()
+
+        st.caption("若要在背景重新同步資料：")
+        _sync_target = st.selectbox(
+            "同步範圍",
+            ["all", "us_house", "us_senate", "tw_legislator"],
+            key="sync_target",
+        )
+        if st.button("🔄 背景同步", use_container_width=True, key="bg_sync"):
+            try:
+                script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sync_data.py")
+                subprocess.Popen(
+                    ["python3", script, "--source", _sync_target],
+                    cwd=os.path.dirname(script),
+                )
+                st.success(f"已在背景啟動同步：{_sync_target}\n稍後重新整理本頁即可看到新資料。")
+                _get_sync_log.clear()
+            except Exception as e:
+                st.error(f"啟動同步失敗：{e}")
 
     country = st.radio("資料來源", ["🇺🇸 美國國會", "🇹🇼 台灣民代", "🏦 機構 13F"], horizontal=True)
 
@@ -1020,8 +1213,13 @@ with st.sidebar:
         chambers = st.multiselect(
             "院別", ["眾議院", "參議院"], default=["眾議院", "參議院"],
         )
-        st.caption("資料來源：House Clerk PTR ＋ CapitolTrades")
-        days = st.selectbox("掃描天數", [7, 14, 30, 60, 90], index=2)
+        st.caption("資料來源：House Clerk PTR ＋ Senate eFD（本地快取）")
+        _range_opts = {
+            "30 天": 30, "90 天": 90, "半年": 182,
+            "1 年": 365, "2 年": 730, "3 年": 1095,
+        }
+        _range_label = st.selectbox("時間範圍", list(_range_opts.keys()), index=1)
+        days = _range_opts[_range_label]
         if st.button("🔍 立即掃描", type="primary", use_container_width=True):
             st.cache_data.clear()
         st.divider()
@@ -1355,6 +1553,17 @@ if country == "🇺🇸 美國國會":
     # 明細表
     st.subheader(f"明細（{len(dff)} 筆）")
 
+    # ── 姓名篩選 ──
+    _us_name_q = st.text_input(
+        "🔎 依議員姓名篩選（支援部分字串，不分大小寫）",
+        key="us_name_filter",
+        placeholder="例：Pelosi / Tuberville",
+    )
+    if _us_name_q:
+        _kw = _us_name_q.strip().lower()
+        dff = dff[dff["議員"].str.lower().str.contains(_kw, na=False)]
+        st.caption(f"篩選後：{len(dff)} 筆")
+
     # ── 議員統計 ──
     _us_legislators   = dff["議員"].nunique()
     _us_tickers       = dff["標的"].nunique()
@@ -1595,6 +1804,17 @@ elif country == "🇹🇼 台灣民代":
     # 明細表
     st.subheader(f"持股明細（{len(dff_tw)} 筆）")
 
+    # ── 姓名篩選 ──
+    _tw_name_q = st.text_input(
+        f"🔎 依{_role_label}姓名篩選（支援部分字串）",
+        key="tw_name_filter",
+        placeholder="例：黃國昌",
+    )
+    if _tw_name_q:
+        _kw = _tw_name_q.strip()
+        dff_tw = dff_tw[dff_tw["姓名"].astype(str).str.contains(_kw, na=False)]
+        st.caption(f"篩選後：{len(dff_tw)} 筆")
+
     # ── 人員統計 ──
     _tw_leg_count = dff_tw["姓名"].nunique()
     _tw_co_count  = dff_tw["公司"].nunique()
@@ -1679,9 +1899,26 @@ else:
     st.title("🏦 機構 13F 持股追蹤")
     st.caption("Berkshire / Bridgewater / Scion / Pershing Square / Renaissance / Appaloosa / Duquesne / ARK / Oaktree")
 
-    @st.cache_data(ttl=6 * 3600, show_spinner="抓取 SEC EDGAR 13F 資料中…")
+    @st.cache_data(ttl=300, show_spinner=False)
     def _load_funds():
-        return f13.fetch_all()
+        # 離線版：從 data.db 的 funds_13f_cache 讀取
+        if not _local_db_ready():
+            st.warning("⚠️ 尚未同步 13F 資料，請先執行 `python sync_data.py --source funds_13f`")
+            return []
+        try:
+            with sqlite3.connect(DATA_DB_PATH) as c:
+                row = c.execute(
+                    "SELECT payload, _synced_at FROM funds_13f_cache WHERE key='all'"
+                ).fetchone()
+            if not row:
+                st.warning("⚠️ data.db 無 13F 快取，請先執行 `python sync_data.py --source funds_13f`")
+                return []
+            import json as _json
+            st.caption(f"📦 本地快取時間：{row[1]}")
+            return _json.loads(row[0])
+        except Exception as e:
+            st.error(f"讀取 13F 快取失敗：{e}")
+            return []
 
     funds = _load_funds()
 
@@ -1735,14 +1972,36 @@ else:
         with st.expander(header, expanded=(f["manager"] in ("Warren Buffett", "Michael Burry"))):
             if f.get("desc"):
                 st.caption(f"📖 {f['desc']}")
+
+            # 歷史季度選擇（近 3 年）
+            history = f.get("history") or []
+            if len(history) > 1:
+                labels = [f"{h['filed']} ({h['form']})" for h in history]
+                sel_idx = st.selectbox(
+                    "選擇季度",
+                    range(len(labels)),
+                    format_func=lambda i: labels[i],
+                    key=f"hist_{f['cik']}",
+                )
+                snap = history[sel_idx]
+                snap_top = snap["top_holdings"]
+                snap_total = snap["total_value"]
+                snap_changes = snap["changes"]
+                snap_cnt = snap["holdings_count"]
+                st.caption(f"📅 {snap['filed']}　｜　{snap_cnt} 檔　｜　{_fmt_val(snap_total)}")
+            else:
+                snap_top = f["top_holdings"]
+                snap_total = f["total_value"]
+                snap_changes = f["changes"]
+
             col1, col2 = st.columns(2)
 
             # Top 持股
             with col1:
                 st.markdown("##### Top 20 持股")
-                top_df = pd.DataFrame(f["top_holdings"])
+                top_df = pd.DataFrame(snap_top)
                 if not top_df.empty:
-                    top_df["佔比"] = (top_df["value"] / f["total_value"] * 100).round(2)
+                    top_df["佔比"] = (top_df["value"] / max(snap_total, 1) * 100).round(2)
                     top_df = top_df[["name", "shares", "value", "佔比"]]
                     top_df.columns = ["標的", "股數", "市值", "佔比%"]
                     st.dataframe(
@@ -1756,7 +2015,7 @@ else:
             # 季變動
             with col2:
                 st.markdown("##### 本季變動")
-                changes = f["changes"]
+                changes = snap_changes
                 if f13_change_filter:
                     changes = [c for c in changes if c["change_type"] in f13_change_filter]
                 if f13_search:
