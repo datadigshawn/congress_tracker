@@ -38,19 +38,22 @@ st.set_page_config(
 
 # ── 本地資料庫 ──────────────────────────────────────────────────
 # 在 Streamlit Cloud 上，專案目錄為 read-only 的 clone，我們把 data.db 放到
-# /tmp 下（container 可寫），並在首次啟動時從 GitHub Release 下載。
+# 可寫目錄（tempfile），並在首次啟動時從 GitHub Release 下載。
 # 本機執行則直接用 repo 內的 data.db。
+import tempfile as _tempfile
 from confpath import DATA_DB as _LOCAL_DB_PATH_ROOT
 _LOCAL_DB_PATH = _LOCAL_DB_PATH_ROOT
-_CLOUD_DB_PATH = "/tmp/data.db"
-# 偵測是否在 Streamlit Cloud（環境變數 HOSTNAME 通常是 streamlit）
-_IS_CLOUD = bool(os.environ.get("STREAMLIT_RUNTIME_CLOUD")) or "HOSTNAME" in os.environ and "streamlit" in os.environ.get("HOSTNAME", "").lower()
+_CLOUD_DB_DIR  = _tempfile.gettempdir()  # 跨平台取得可寫 temp 目錄
+_CLOUD_DB_PATH = os.path.join(_CLOUD_DB_DIR, "data.db")
 
 def _resolve_data_db_path() -> str:
     # 本機：優先用 repo 內已同步好的 data.db
     if os.path.exists(_LOCAL_DB_PATH):
         return _LOCAL_DB_PATH
-    # 雲端：放 /tmp 以便後續下載
+    # 雲端 temp 已有快取
+    if os.path.exists(_CLOUD_DB_PATH):
+        return _CLOUD_DB_PATH
+    # 雲端：回傳 temp 路徑以便稍後下載
     return _CLOUD_DB_PATH
 
 DATA_DB_PATH = _resolve_data_db_path()
@@ -64,6 +67,7 @@ DATA_DB_PATH = _resolve_data_db_path()
 #   token = "ghp_xxx"          # 可選：private repo 才需要
 def _download_data_db_from_release() -> tuple[bool, str]:
     """從 GitHub Release 下載 data.db → DATA_DB_PATH。回傳 (ok, message)。"""
+    global DATA_DB_PATH
     try:
         cfg = st.secrets.get("data_release", {}) if hasattr(st, "secrets") else {}
     except Exception:
@@ -78,25 +82,51 @@ def _download_data_db_from_release() -> tuple[bool, str]:
     if token:
         headers["Authorization"] = f"Bearer {token}"
     try:
+        # 1) 取得 release 資訊
         r = requests.get(api, headers=headers, timeout=30)
         r.raise_for_status()
         rel = r.json()
         target = next((a for a in rel.get("assets", []) if a["name"] == asset), None)
         if not target:
             return False, f"Release {tag} 找不到 asset `{asset}`"
-        dl_url = target["url"]  # 用 API url 搭配 Accept: octet-stream 才能抓 private asset
-        dl_headers = dict(headers)
-        dl_headers["Accept"] = "application/octet-stream"
-        with requests.get(dl_url, headers=dl_headers, stream=True, timeout=300) as dr:
-            dr.raise_for_status()
-            os.makedirs(os.path.dirname(DATA_DB_PATH) or ".", exist_ok=True)
-            tmp = DATA_DB_PATH + ".part"
-            with open(tmp, "wb") as f:
-                for chunk in dr.iter_content(chunk_size=1 << 20):
-                    if chunk:
-                        f.write(chunk)
-            os.replace(tmp, DATA_DB_PATH)
-        size_mb = os.path.getsize(DATA_DB_PATH) / (1024 * 1024)
+
+        # 2) 用 browser_download_url（public repo 可直接下載，不需 token）
+        dl_url = target.get("browser_download_url") or target["url"]
+        dl_headers = {"User-Agent": "congressTrack-offline"}
+        if not target.get("browser_download_url"):
+            # 私有 repo fallback 到 API url + octet-stream
+            dl_headers = dict(headers)
+            dl_headers["Accept"] = "application/octet-stream"
+            dl_url = target["url"]
+
+        # 3) 下載到 temp 檔再 rename
+        dest = _CLOUD_DB_PATH if not os.path.exists(_LOCAL_DB_PATH) else DATA_DB_PATH
+        dest_dir = os.path.dirname(dest)
+        os.makedirs(dest_dir, exist_ok=True)
+
+        # 用 tempfile 確保寫在同一 filesystem（os.replace 要求同一 fs）
+        fd, tmp_path = _tempfile.mkstemp(dir=dest_dir, suffix=".db.part")
+        try:
+            with requests.get(dl_url, headers=dl_headers, stream=True, timeout=600) as dr:
+                dr.raise_for_status()
+                total = 0
+                with os.fdopen(fd, "wb") as f:
+                    for chunk in dr.iter_content(chunk_size=1 << 20):
+                        if chunk:
+                            f.write(chunk)
+                            total += len(chunk)
+            if total == 0:
+                os.unlink(tmp_path)
+                return False, "下載內容為空（0 bytes），請確認 Release asset 是否正確"
+            os.replace(tmp_path, dest)
+        except Exception:
+            # 清理殘留 temp 檔
+            try: os.unlink(tmp_path)
+            except OSError: pass
+            raise
+
+        DATA_DB_PATH = dest
+        size_mb = total / (1024 * 1024)
         updated = target.get("updated_at", "?")
         return True, f"✅ 已下載 {asset} ({size_mb:.1f} MB)，release 更新時間 {updated}"
     except Exception as e:
