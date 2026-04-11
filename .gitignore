@@ -7,3 +7,4 @@ data.db
 data.db.part
 venv/
 .streamlit/secrets.toml
+啟動指令與資料夾架構.txt
