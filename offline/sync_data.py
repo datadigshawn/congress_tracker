@@ -87,10 +87,11 @@ _install_fake_streamlit()
 # app.py 在模組層執行 UI 程式碼 (with st.sidebar: ...)，
 # 因此無法直接 import。改為 compile + exec 前半部（定義區），
 # 切點在 "# ── 側邊欄" 之前，僅載入函式定義。
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+_PROJECT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+sys.path.insert(0, _PROJECT_ROOT)
 
 def _load_app_functions() -> dict:
-    app_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "app.py")
+    app_path = os.path.join(_PROJECT_ROOT, "online", "app.py")
     with open(app_path, encoding="utf-8") as f:
         src = f.read()
     cut = src.find("# ── 側邊欄")
@@ -109,7 +110,7 @@ app = types.SimpleNamespace(**_load_app_functions())  # noqa: E402
 # ══════════════════════════════════════════════════════════════════
 # 2. DB schema
 # ══════════════════════════════════════════════════════════════════
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data.db")
+from confpath import DATA_DB as DB_PATH
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS us_trades (

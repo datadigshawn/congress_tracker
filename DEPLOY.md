@@ -7,9 +7,9 @@
 1. **先在本機同步好 data.db**
    ```bash
    source venv/bin/activate
-   python sync_data.py --source all
+   python offline/sync_data.py --source all
    # 需要縣市議員再補：
-   python sync_data.py --source tw_councilor --cities 臺北市 新北市 ... --from 2023-01 --to 2026-04
+   python offline/sync_data.py --source tw_councilor --cities 臺北市 新北市 ... --from 2023-01 --to 2026-04
    ```
 
 2. **安裝 gh CLI 並登入**
@@ -33,7 +33,7 @@
 
 5. **到 https://share.streamlit.io 部署**
    - New app → 選 `datadigshawn/congress_tracker`
-   - Main file path: `app_offline.py`
+   - Main file path: `offline/app.py`
    - Python version: 3.11+
    - Advanced → Secrets 貼上：
      ```toml
@@ -49,7 +49,7 @@
 
 ## 日常更新流程
 
-本機跑完 `sync_data.py` 後：
+本機跑完 `offline/sync_data.py` 後：
 ```bash
 ./scripts/upload_data_db.sh
 ```
@@ -62,4 +62,4 @@ Streamlit Cloud 的 app 下次打開、或按側邊欄的「⬇️ 從 GitHub Re
 - **data.db 超過 2GB**：GitHub Release 單檔上限 2GB，真的塞不下再考慮 R2 / S3。
 - **下載很慢**：Release asset 走 CDN，一般 29MB 在幾秒內。
 - **Streamlit Cloud 免費版記憶體**：~1GB，目前用量遠低於此。
-- **資料庫隨時間變大**：在 `sync_data.py` 上加 `--prune 10` 保持 10 年窗口。
+- **資料庫隨時間變大**：在 `offline/sync_data.py` 上加 `--prune 10` 保持 10 年窗口。

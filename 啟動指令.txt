@@ -1,6 +1,0 @@
-cd /Users/shawnclaw/autobot/congressTrack
-# 如果這個專案還沒有自己的 venv，先建一個
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-streamlit run app.py
